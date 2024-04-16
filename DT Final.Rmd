@@ -1,0 +1,452 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(rpart)
+library(caret)
+library(rattle)
+library(rpart.plot)
+library(ROCR)
+```
+
+```{r Over-Under Data Preprocessing}
+df = read.csv('A://shared//P428//Datasets//neumann_feats_all.csv')
+df$RaceEthnicity = as.factor(df$RaceEthnicity)
+levels(df$RaceEthnicity) = c('H', 'B', 'W', 'O')
+df$LivingSituation = as.factor(df$LivingSituation)
+df$CurrSmoking = as.factor(df$CurrSmoking)
+df$AlcUse = as.factor(df$AlcUse)
+df$Endpoint = as.factor(df$Endpoint)
+df$BMI = cut(df$BMI, 
+             breaks = c(0, 18.5, 25, 30, 100),
+             labels = c('under', 'normal', 'over', 'obese'))
+
+df_us2 = df %>% filter(Country == 2) %>%
+  select(-c(Country, Yr1Adherence, Treatment))
+
+df_us2 = na.omit(df_us2)
+
+df_us = df_us2
+
+```
+
+```{r Train Functions}
+train_trees = function(n_iter, df, seed, cp, sample_method='over') {
+  trn_accs = c()
+  tst_accs = c()
+  trn_sens = c()
+  tst_sens = c()
+  trn_specs = c()
+  tst_specs = c()
+  trn_ppvs = c()
+  tst_ppvs = c()
+  trees = c()
+  v_imps = c()
+  trn_aucs = c()
+  tst_aucs = c()
+  cms = c()
+  
+  for (i in seq(n_iter)) {
+    set.seed(seed + i)
+    ix = sample(c(T, F), nrow(df), replace=T, prob=c(0.5, 0.5))
+    df_trn = df[ix, ]
+    df_0 = df_trn[df_trn$Endpoint == 0, ]
+    df_1 = df_trn[df_trn$Endpoint == 1, ]
+    if (sample_method == 'over') {
+      ix_oversamp = sample(seq(nrow(df_1)), nrow(df_0), replace=T)
+      df_new = rbind(df_1[ix_oversamp, ], df_0)
+    } else if (sample_method == 'under') {
+      ix_undersamp = sample(seq(nrow(df_0)), nrow(df_1), replace=F)
+      df_new = rbind(df_0[ix_undersamp, ], df_1)
+    }
+    
+    tree_params = rpart.control(cp=cp)
+    tree = rpart(Endpoint ~ ., data=df_new, method='class', control=tree_params)
+    trees[[i]] = tree
+    v_imps[[i]] = tree$variable.importance
+    
+    trainPreds = predict(tree, newdata=df_new, type='class')
+    trainPredsProb = predict(tree, newdata=df_new, type='prob')[, 2]
+    trainRocPred = prediction(trainPredsProb, df_new$Endpoint)
+    trn_aucs[i] = performance(trainRocPred, measure='auc')@y.values[[1]]
+    trainCm = confusionMatrix(df_new$Endpoint, trainPreds, positive='1')
+    trn_accs[i] = trainCm$overall[1]
+    trn_sens[i] = trainCm$byClass[1]
+    trn_specs[i] = trainCm$byClass[2]
+    trn_ppvs[i] = trainCm$byClass[3]
+    
+    df_tst = df[!ix, ]
+    testPreds = predict(tree, newdata=df_tst, type='class')
+    testPredsProb = predict(tree, newdata=df_tst, type='prob')[, 2]
+    testRocPred = prediction(testPredsProb, df_tst$Endpoint)
+    tst_aucs[i] = performance(testRocPred, measure='auc')@y.values[[1]]
+    testCm = confusionMatrix(df_tst$Endpoint, testPreds, positive = '1')
+    cms[[i]] = testCm
+    tst_accs[i] = testCm$overall[1]
+    tst_sens[i] = testCm$byClass[1]
+    tst_specs[i] = testCm$byClass[2]
+    tst_ppvs[i] = testCm$byClass[3]
+  }
+  return(list('trn_accs'=trn_accs, 'tst_accs'=tst_accs, 'trn_sens'=trn_sens, 
+              'tst_sens'=tst_sens, 'trn_specs'=trn_specs, 'tst_specs'=tst_specs, 
+              'trn_ppvs'=trn_ppvs, 'tst_ppvs'=tst_ppvs, 'trn_aucs'=trn_aucs,
+              'tst_aucs'=tst_aucs, 'trees'=trees, 'v_imps'=v_imps, 'cms'=cms))
+}
+
+train_trees_bootstrap = function(n_iter, df, seed){
+  trn_accs = c()
+  tst_accs = c()
+  trn_sens = c()
+  tst_sens = c()
+  trn_specs = c()
+  tst_specs = c()
+  trn_ppvs = c()
+  tst_ppvs = c()
+  trees = c()
+  v_imps = c()
+  trn_aucs = c()
+  tst_aucs = c()
+  
+  set.seed(seed)
+  # Stratified 50/50 split
+  df_0 = df[df$Endpoint == 0, ]
+  df_1 = df[df$Endpoint == 1, ]
+  
+  trn_0 = df_0 %>% sample_frac(0.5)
+  tst_0 = df_0 %>% anti_join(trn_0, by='ID')
+  trn_1 = df_1 %>% sample_frac(0.5)
+  tst_1 = df_1 %>% anti_join(trn_1, by='ID')
+  
+  # Creating unbalanced test set
+  tst_df = rbind(tst_0, tst_1)
+  tst_df = tst_df %>% select(-c(ID))
+  
+  # Oversampling train set
+  over_ix = sample(seq(nrow(trn_1)), nrow(trn_0), replace=TRUE)
+  trn_1_over = trn_1[over_ix, ]
+  trn_df = rbind(trn_0, trn_1_over)
+  trn_df = trn_df %>% select(-c(ID))
+  #weights_0 = rep(1, nrow(trn_0))
+  #weights_1 = rep(nrow(trn_0)/nrow(trn_1), nrow(trn_1))
+  #weights = c(weights_0, weights_1)
+
+  
+  # Iterate n_iter times for confidence
+  for (i in seq(n_iter)) {
+    # Get bootstraps
+    set.seed(seed + i)
+    boot_ix = sample(seq(nrow(trn_df)), nrow(trn_df), replace=TRUE)
+    trn_df_boot = trn_df[boot_ix, ]
+    
+    # 10-fold CV for cp
+    unpruned_tree = rpart(Endpoint ~ ., data=trn_df_boot, method='class')
+    cpt = unpruned_tree$cptable
+    min_err_ix = which.min(cpt[, 'xerror'])
+    err_thresh = cpt[min_err_ix, 'xerror'] + cpt[min_err_ix, 'xstd']
+    #print(cpt[min_err_ix, 'xerror'])
+    prune_cp = min(cpt[cpt[, 'nsplit'] <= 5, 'CP'])
+    tree = prune(unpruned_tree, cp=prune_cp)
+    #params = rpart.control(maxdepth=3)
+    #tree = rpart(Endpoint ~ ., data=trn_df_boot, method='class', control=params)
+    
+    trees[[i]] = tree
+    v_imps[[i]] = tree$variable.importance
+    
+    trainPreds = predict(tree, newdata=trn_df_boot, type='class')
+    trainPredsProb = predict(tree, newdata=trn_df_boot, type='prob')[, 2]
+    trainRocPred = prediction(trainPredsProb, trn_df_boot$Endpoint)
+    trn_aucs[i] = performance(trainRocPred, measure='auc')@y.values[[1]]
+    trainCm = confusionMatrix(trainPreds, trn_df_boot$Endpoint, positive='1')
+    trn_accs[i] = trainCm$overall[1]
+    trn_sens[i] = trainCm$byClass[1]
+    trn_specs[i] = trainCm$byClass[2]
+    trn_ppvs[i] = trainCm$byClass[3]
+    
+    testPreds = predict(tree, newdata=tst_df, type='class')
+    testPredsProb = predict(tree, newdata=tst_df, type='prob')[, 2]
+    testRocPred = prediction(testPredsProb, tst_df$Endpoint)
+    tst_aucs[i] = performance(testRocPred, measure='auc')@y.values[[1]]
+    testCm = confusionMatrix(testPreds, tst_df$Endpoint, positive = '1')
+    tst_accs[i] = testCm$overall[1]
+    tst_sens[i] = testCm$byClass[1]
+    tst_specs[i] = testCm$byClass[2]
+    tst_ppvs[i] = testCm$byClass[3]
+  }
+  return(list('trn_accs'=trn_accs, 'tst_accs'=tst_accs, 'trn_sens'=trn_sens, 
+              'tst_sens'=tst_sens, 'trn_specs'=trn_specs, 'tst_specs'=tst_specs, 
+              'trn_ppvs'=trn_ppvs, 'tst_ppvs'=tst_ppvs, 'trn_aucs'=trn_aucs,
+              'tst_aucs'=tst_aucs, 'trees'=trees, 'v_imps'=v_imps))
+}
+
+median_tree = function(metric_arr, trees) {
+  ix = sort(metric_arr, index.return=T)$ix
+  mid_ix = ix[length(ix)%/%2]
+  mid_tree = trees[[mid_ix]]
+  fancyRpartPlot(mid_tree)
+  return(mid_tree)
+}
+
+avg_v_imp = function(v_imps) {
+  v_imps = bind_rows(v_imps)
+  avg_imps = colMeans(v_imps, na.rm=TRUE)
+  avg_imps = sort(avg_imps)
+  barchart(avg_imps)
+}
+
+```
+
+```{r}
+set.seed(123)
+df_out = df %>% filter(Country == 2) %>%
+  select(-c(Country, Yr1Adherence))
+  
+# Stratified 50/50 split
+df_0 = df_out[df_out$Endpoint == 0, ]
+df_1 = df_out[df_out$Endpoint == 1, ]
+
+trn_0 = df_0 %>% sample_frac(0.5)
+tst_0 = df_0 %>% anti_join(trn_0, by='ID')
+trn_1 = df_1 %>% sample_frac(0.5)
+tst_1 = df_1 %>% anti_join(trn_1, by='ID')
+
+# Creating unbalanced test set
+tst_df = rbind(tst_0, tst_1)
+write.csv(tst_df, 'A://shared//P428//Datasets//test_data.csv')
+
+# Oversampling train set
+#over_ix = sample(seq(nrow(trn_1)), nrow(trn_0), replace=TRUE)
+#trn_1_over = trn_1[over_ix, ]
+trn_df = rbind(trn_0, trn_1)
+write.csv(trn_df, 'A://shared//P428//Datasets//train_data.csv')
+
+```
+
+```{r Bootstrap Train}
+df = df_us
+seed = 123
+
+n_reps=30
+res = train_trees_bootstrap(n_reps, df, seed)
+trn_accs = res$trn_accs
+tst_accs = res$tst_accs
+trn_sens = res$trn_sens
+tst_sens = res$tst_sens
+trn_specs = res$trn_specs
+tst_specs = res$tst_specs
+trn_ppvs = res$trn_ppvs
+tst_ppvs = res$tst_ppvs
+trn_aucs = res$trn_aucs
+tst_aucs = res$tst_aucs
+trees = res$trees
+v_imps = res$v_imps
+
+cat('Mean Train Accuracy:', mean(trn_accs), '+/-', 1.96*sd(trn_accs)/sqrt(n_reps), '\n')
+cat('Mean Train Sens:', mean(trn_sens), '+/-', 1.96*sd(trn_sens)/sqrt(n_reps), '\n')
+cat('Mean Train Spec:', mean(trn_specs), '+/-', 1.96*sd(trn_specs)/sqrt(n_reps), '\n')
+cat('Mean Train PPV:', mean(trn_ppvs), '+/-', 1.96*sd(trn_ppvs)/sqrt(n_reps), '\n')
+cat('Mean Train AUC:', mean(trn_aucs), '+/-', 1.96*sd(trn_aucs)/sqrt(n_reps), '\n')
+
+cat('Mean Test Accuracy:', mean(tst_accs), '+/-', 1.96*sd(tst_accs)/sqrt(n_reps), '\n')
+cat('Mean Test Sens:', mean(tst_sens), '+/-', 1.96*sd(tst_sens)/sqrt(n_reps), '\n')
+cat('Mean Test Spec:', mean(tst_specs), '+/-', 1.96*sd(tst_specs)/sqrt(n_reps), '\n')
+cat('Mean Test PPV:', mean(tst_ppvs), '+/-', 1.96*sd(tst_ppvs)/sqrt(n_reps), '\n')
+cat('Mean Test AUC:', mean(tst_aucs), '+/-', 1.96*sd(tst_aucs)/sqrt(n_reps))
+
+med_tree = median_tree(tst_accs, trees)
+
+avg_v_imp(v_imps)
+```
+```{r}
+library(treeClust)
+tst_data = read.csv('A://shared//P428//Datasets//test_data.csv')
+tst_data = na.omit(tst_data)
+tst_data$LivingSituation = as.factor(tst_data$LivingSituation)
+tst_data$CurrSmoking = as.factor(tst_data$CurrSmoking)
+tst_data$AlcUse = as.factor(tst_data$AlcUse)
+leaf_nodes = rpart.predict.leaves(med_tree, newdata=tst_data, type='where')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==3, 'A')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==4, 'B')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==7, 'C')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==9, 'D')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==10, 'E')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==11, 'F')
+subgroupDf = as.data.frame(tst_data$ID)
+colnames(subgroupDf) = c('ID')
+subgroupDf$Endpoint = tst_data$Endpoint
+subgroupDf$Subgroups = leaf_nodes
+write.csv(subgroupDf, 'A://shared//P428//Edward_Clustering_DT//DTGroups.csv', row.names=F)
+```
+
+```{r Over}
+n_reps = 30
+res = train_trees(n_reps, df_us, 123, cp=0.02, sample_method='over')
+trn_accs = res$trn_accs
+tst_accs = res$tst_accs
+trn_sens = res$trn_sens
+tst_sens = res$tst_sens
+trn_specs = res$trn_specs
+tst_specs = res$tst_specs
+trn_ppvs = res$trn_ppvs
+tst_ppvs = res$tst_ppvs
+trn_aucs = res$trn_aucs
+tst_aucs = res$tst_aucs
+trees = res$trees
+cms = res$cms
+
+cat('Mean Train Accuracy:', mean(trn_accs), '+/-', 1.96*sd(trn_accs)/sqrt(n_reps), '\n')
+cat('Mean Train Sens:', mean(trn_sens), '+/-', 1.96*sd(trn_sens)/sqrt(n_reps), '\n')
+cat('Mean Train Spec:', mean(trn_specs), '+/-', 1.96*sd(trn_specs)/sqrt(n_reps), '\n')
+cat('Mean Train PPV:', mean(trn_ppvs), '+/-', 1.96*sd(trn_ppvs)/sqrt(n_reps), '\n')
+cat('Mean Train AUC:', mean(trn_aucs), '+/-', 1.96*sd(trn_aucs)/sqrt(n_reps), '\n')
+
+cat('Mean Test Accuracy:', mean(tst_accs), '+/-', 1.96*sd(tst_accs)/sqrt(n_reps), '\n')
+cat('Mean Test Sens:', mean(tst_sens), '+/-', 1.96*sd(tst_sens)/sqrt(n_reps), '\n')
+cat('Mean Test Spec:', mean(tst_specs), '+/-', 1.96*sd(tst_specs)/sqrt(n_reps), '\n')
+cat('Mean Test PPV:', mean(tst_ppvs), '+/-', 1.96*sd(tst_ppvs)/sqrt(n_reps), '\n')
+cat('Mean Test AUC:', mean(tst_aucs), '+/-', 1.96*sd(tst_aucs)/sqrt(n_reps))
+
+med_tree = median_tree(tst_accs, trees)
+
+```
+
+```{r Under}
+n_reps = 30
+res = train_trees(n_reps, df_us, 123, cp=0.035, sample_method='under')
+trn_accs = res$trn_accs
+tst_accs = res$tst_accs
+trn_sens = res$trn_sens
+tst_sens = res$tst_sens
+trn_specs = res$trn_specs
+tst_specs = res$tst_specs
+trn_ppvs = res$trn_ppvs
+tst_ppvs = res$tst_ppvs
+
+cat('Mean Train Accuracy:', mean(trn_accs), '+/-', 1.96*sd(trn_accs)/sqrt(n_reps), '\n')
+cat('Mean Train Sens:', mean(trn_sens), '+/-', 1.96*sd(trn_sens)/sqrt(n_reps), '\n')
+cat('Mean Train Spec:', mean(trn_specs), '+/-', 1.96*sd(trn_specs)/sqrt(n_reps), '\n')
+cat('Mean Train PPV:', mean(trn_ppvs), '+/-', 1.96*sd(trn_ppvs)/sqrt(n_reps), '\n')
+
+cat('Mean Test Accuracy:', mean(tst_accs), '+/-', 1.96*sd(tst_accs)/sqrt(n_reps), '\n')
+cat('Mean Test Sens:', mean(tst_sens), '+/-', 1.96*sd(tst_sens)/sqrt(n_reps), '\n')
+cat('Mean Test Spec:', mean(tst_specs), '+/-', 1.96*sd(tst_specs)/sqrt(n_reps), '\n')
+cat('Mean Test PPV:', mean(tst_ppvs), '+/-', 1.96*sd(tst_ppvs)/sqrt(n_reps), '\n')
+
+med_tree = median_tree(tst_accs, trees)
+```
+
+```{r SMOTE-preprocessing}
+train_df = read.csv('A://shared//P428//neumann_feats_SMOTE_train_24.csv')
+test_df = read.csv('A://shared//P428//neumann_feats_SMOTE_test_24.csv')
+train_df$RaceEthnicity = as.factor(train_df$RaceEthnicity)
+train_df$LivingSituation = as.factor(train_df$LivingSituation)
+train_df$CurrSmoking = as.factor(train_df$CurrSmoking)
+train_df$AlcUse = as.factor(train_df$AlcUse)
+train_df$Endpoint = as.factor(train_df$Endpoint)
+train_df$BMI = cut(train_df$BMI, 
+             breaks = c(0, 18.5, 25, 30, 100),
+             labels = c('under', 'normal', 'over', 'obese'))
+
+test_df$RaceEthnicity = as.factor(test_df$RaceEthnicity)
+test_df$LivingSituation = as.factor(test_df$LivingSituation)
+test_df$CurrSmoking = as.factor(test_df$CurrSmoking)
+test_df$AlcUse = as.factor(test_df$AlcUse)
+test_df$Endpoint = as.factor(test_df$Endpoint)
+test_df$BMI = cut(test_df$BMI, 
+             breaks = c(0, 18.5, 25, 30, 100),
+             labels = c('under', 'normal', 'over', 'obese'))
+
+```
+
+```{r}
+train_trees_smote = function(n_iter, train_df, test_df, seed, cp, sample_method='over') {
+  trn_accs = c()
+  tst_accs = c()
+  trn_sens = c()
+  tst_sens = c()
+  trn_specs = c()
+  tst_specs = c()
+  trn_ppvs = c()
+  tst_ppvs = c()
+  trees = c()
+  
+  for (i in seq(n_iter)) {
+    set.seed(seed + i)
+    boot_ix = sample(nrow(train_df), nrow(train_df), replace=T)
+    df_trn = train_df[boot_ix, ]
+    df_0 = df_trn[df_trn$Endpoint == 0, ]
+    df_1 = df_trn[df_trn$Endpoint == 1, ]
+    if (sample_method == 'over') {
+      ix_oversamp = sample(seq(nrow(df_1)), nrow(df_0), replace=T)
+      df_new = rbind(df_1[ix_oversamp, ], df_0)
+    } else if (sample_method == 'under') {
+      ix_undersamp = sample(seq(nrow(df_0)), nrow(df_1), replace=F)
+      df_new = rbind(df_0[ix_undersamp, ], df_1)
+    }
+    
+    tree_params = rpart.control(cp=cp)
+    tree = rpart(Endpoint ~ ., data=df_new, method='class', control=tree_params)
+    trees[[i]] = tree
+    
+    trainPreds = predict(tree, newdata=df_new, type='class')
+    trainCm = confusionMatrix(df_new$Endpoint, trainPreds, positive='1')
+    trn_accs[i] = trainCm$overall[1]
+    trn_sens[i] = trainCm$byClass[1]
+    trn_specs[i] = trainCm$byClass[2]
+    trn_ppvs[i] = trainCm$byClass[3]
+    
+    df_tst = test_df
+    testPreds = predict(tree, newdata=df_tst, type='class')
+    testCm = confusionMatrix(df_tst$Endpoint, testPreds, positive = '1')
+    tst_accs[i] = testCm$overall[1]
+    tst_sens[i] = testCm$byClass[1]
+    tst_specs[i] = testCm$byClass[2]
+    tst_ppvs[i] = testCm$byClass[3]
+  }
+  return(list('trn_accs'=trn_accs, 'tst_accs'=tst_accs, 'trn_sens'=trn_sens, 
+              'tst_sens'=tst_sens, 'trn_specs'=trn_specs, 'tst_specs'=tst_specs, 
+              'trn_ppvs'=trn_ppvs, 'tst_ppvs'=tst_ppvs, 'trees'=trees))
+}
+```
+
+```{r}
+n_reps = 30
+res = train_trees_smote(n_reps, train_df, test_df, 123, cp=0.035, sample_method='over')
+trn_accs = res$trn_accs
+tst_accs = res$tst_accs
+trn_sens = res$trn_sens
+tst_sens = res$tst_sens
+trn_specs = res$trn_specs
+tst_specs = res$tst_specs
+trn_ppvs = res$trn_ppvs
+tst_ppvs = res$tst_ppvs
+
+cat('Mean Train Accuracy:', mean(trn_accs), '+/-', 1.96*sd(trn_accs)/sqrt(n_reps), '\n')
+cat('Mean Train Sens:', mean(trn_sens), '+/-', 1.96*sd(trn_sens)/sqrt(n_reps), '\n')
+cat('Mean Train Spec:', mean(trn_specs), '+/-', 1.96*sd(trn_specs)/sqrt(n_reps), '\n')
+cat('Mean Train PPV:', mean(trn_ppvs), '+/-', 1.96*sd(trn_ppvs)/sqrt(n_reps), '\n')
+
+cat('Mean Test Accuracy:', mean(tst_accs), '+/-', 1.96*sd(tst_accs)/sqrt(n_reps), '\n')
+cat('Mean Test Sens:', mean(tst_sens), '+/-', 1.96*sd(tst_sens)/sqrt(n_reps), '\n')
+cat('Mean Test Spec:', mean(tst_specs), '+/-', 1.96*sd(tst_specs)/sqrt(n_reps), '\n')
+cat('Mean Test PPV:', mean(tst_ppvs), '+/-', 1.96*sd(tst_ppvs)/sqrt(n_reps), '\n')
+
+med_tree = median_tree(tst_accs, trees)
+```
+
+```{r apply-leaf-nodes}
+library(treeClust)
+leaf_nodes = rpart.predict.leaves(med_tree, newdata=df_us, type='where')
+sort(unique(leaf_nodes))
+leaf_nodes = replace(leaf_nodes, leaf_nodes==4, 'A')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==6, 'B')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==7, 'C')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==10, 'D')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==11, 'E')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==12, 'F')
+leaf_nodes = replace(leaf_nodes, leaf_nodes==13, 'G')
+df_us2$PredLeaf = leaf_nodes
+write.csv(df_us2, 'A://Data//DecisionTrees//Neumann_US_Leaf_Nodes.csv', row.names=F)
+```

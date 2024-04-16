@@ -1,0 +1,240 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(MLmetrics)
+library(randomForest)
+library(randomForestSRC)
+```
+```{r}
+# Load the training dataset
+
+setwd("A:/shared/P428/Datasets")
+df = read_csv('train_data.csv')
+df <- df[, -1]
+df = na.omit(df)
+
+df$RaceEthnicity = as.factor(df$RaceEthnicity)
+df$Education = as.factor(df$Education)
+df$LivingSituation = as.factor(df$LivingSituation)
+df$CurrSmoking = as.factor(df$CurrSmoking)
+df$AlcUse = as.factor(df$AlcUse)
+df$Frailty = factor(df$Frailty, ordered=T)
+df$Endpoint = factor(df$Endpoint)
+colnames(df) = make.names(colnames(df))
+
+# Oversample minority class
+trn_0 = df[df$Endpoint == 0, ]
+trn_1 = df[df$Endpoint == 1, ]
+over_ix = sample(seq(nrow(trn_1)), nrow(trn_0), replace=TRUE)
+trn_1_over = trn_1[over_ix, ]
+trn_df = rbind(trn_0, trn_1_over)
+trn_df = trn_df %>% select(-c(ID, Treatment))
+
+```
+```{r}
+table(trn_df$Endpoint)
+```
+```{r}
+
+setwd("A:/shared/P428/Datasets")
+test = read_csv('test_data.csv')
+
+test = na.omit(test)
+safeID <- list(test$ID)
+test <- test[, -1]
+test <- test[, -1]
+
+
+test$RaceEthnicity = as.factor(test$RaceEthnicity)
+test$Education = as.factor(test$Education)
+test$LivingSituation = as.factor(test$LivingSituation)
+test$CurrSmoking = as.factor(test$CurrSmoking)
+test$AlcUse = as.factor(test$AlcUse)
+test$Frailty = factor(test$Frailty, ordered=T)
+test$Endpoint = factor(test$Endpoint)
+colnames(test) = make.names(colnames(test))
+
+
+
+
+seed = 123
+n_iter = 30
+
+train_accs = c()
+train_sens = c()
+train_specs = c()
+train_auc_list = c()
+train_pre_list = c()
+
+
+test_accs = c()
+test_sens = c()
+test_specs = c()
+test_auc_list = c()
+test_pre_list = c()
+
+v_imps = data.frame()
+
+for (i in seq(n_iter)) {
+  
+    # Get bootstraps
+    set.seed(seed + i)
+  
+    boot_ix = sample(seq(nrow(trn_df)), nrow(trn_df), replace=TRUE)
+    trn_df_boot = trn_df[boot_ix, ]
+
+ 
+    rf <- randomForest(Endpoint ~., data=trn_df, proximity = F, ntree= 100, maxnodes= 10)
+    
+    v_imp = data.frame(t(importance(rf)))
+    v_imps = v_imps %>% bind_rows(v_imp)
+  
+    train_preds = predict(rf, trn_df, type='class')
+    train_cm = confusionMatrix(train_preds, trn_df$Endpoint, positive='1')
+    train_accs = append(train_accs, as.numeric(train_cm$overall[1]))
+    train_sens = append(train_sens, as.numeric(train_cm$byClass[1]))
+    train_specs = append(train_specs, as.numeric(train_cm$byClass[2]))
+    train_pre_list = append(train_pre_list, as.numeric(train_cm$byClass[3]))
+    
+    library(ROCR)
+    trainPredsProb = predict(rf, trn_df, type = "prob")[, 2]
+    trainROCPred = prediction(trainPredsProb, trn_df$Endpoint)
+    train_auc = performance(trainROCPred, measure = 'auc')@y.values[[1]]
+    train_auc_list = append(train_auc_list, train_auc)
+    
+    test_preds = predict(rf, test, type='class')
+    test_cm = confusionMatrix(test_preds, test$Endpoint, positive='1')
+    test_accs = append(test_accs, as.numeric(test_cm$overall[1]))
+    test_sens = append(test_sens, as.numeric(test_cm$byClass[1]))
+    test_specs = append(test_specs, as.numeric(test_cm$byClass[2]))
+    test_pre_list = append(test_pre_list, as.numeric(test_cm$byClass[3]))
+    
+    testPreds = predict(rf, test, type = "class")
+    testPredsProb = predict(rf, test, type = "prob")[, 2]
+    testROCPred = prediction(testPredsProb, test$Endpoint)
+    test_auc = performance(testROCPred, measure = 'auc')@y.values[[1]]
+    test_auc_list = append(test_auc_list, test_auc)
+    
+}
+    
+```
+
+
+```{r}
+n_reps = n_iter
+cat('Training Accuracy:', mean(train_accs), '+/-', 1.96*sd(train_accs)/sqrt(n_reps))
+cat('\nTraining Sensitivity:', mean(train_sens), '+/-', 1.96*sd(train_sens)/sqrt(n_reps))
+cat('\nTraining Specificity:', mean(train_specs), '+/-', 1.96*sd(train_specs)/sqrt(n_reps))
+cat('\nTraining Precision:', mean(train_pre_list), '+/-', 1.96*sd(train_pre_list)/sqrt(n_reps))
+cat('\nTraining AUC:', mean(train_auc_list), '+/-', 1.96*sd(train_auc_list)/sqrt(n_reps))
+
+cat('\nTesting Accuracy:', mean(test_accs), '+/-', 1.96*sd(test_accs)/sqrt(n_reps))
+cat('\nTesting Sensitivity:', mean(test_sens), '+/-', 1.96*sd(test_sens)/sqrt(n_reps))
+cat('\nTesting Specificity:', mean(test_specs), '+/-', 1.96*sd(test_specs)/sqrt(n_reps))
+cat('\nTesting Precision:', mean(test_pre_list), '+/-', 1.96*sd(test_pre_list)/sqrt(n_reps))
+cat('\nTesting AUC:', mean(test_auc_list), '+/-', 1.96*sd(test_auc_list)/sqrt(n_reps))
+```
+```{r}
+v_imps[is.na(v_imps)] = 0
+avg_v_imps = colMeans(v_imps)
+argsort = sort(avg_v_imps, decreasing=T, index.return=T)
+png(filename = "figure.png",width = 900, bg = "white")
+par(mar=c(10,6,4,1)+0.1)
+barplot(head(avg_v_imps[argsort$ix], 15), names.arg=head(names(avg_v_imps[argsort$ix]), 15), ylab='Mean decrease in Gini', las=2)
+
+```
+```{r}
+library(ROCR)
+trainPredsProb = predict(rf, trn_df, type = "prob")[, 2]
+trainROCPred = prediction(trainPredsProb, trn_df$Endpoint)
+performance(trainROCPred, measure = 'auc')@y.values[[1]]
+
+
+testPreds = predict(rf, test, type = "class")
+testPredsProb = predict(rf, test, type = "prob")[, 2]
+testROCPred = prediction(testPredsProb, test$Endpoint)
+performance(testROCPred, measure = 'auc')@y.values[[1]]
+```
+
+```{r}
+seed = 123
+i=0
+set.seed(seed + i)
+boot_ix = sample(seq(nrow(trn_df)), nrow(trn_df), replace=TRUE)
+trn_df_boot = trn_df[boot_ix, ]
+```
+
+
+```{r}
+table(trn_df_boot$Endpoint)
+```
+
+
+```{r}
+tr_control = rpart.control(cp=0.05)
+rf <- randomForest(Endpoint ~., data=trn_df, proximity = TRUE, ntree= 3, max_depth = 3, mtry = 6,control=tr_control,minsplit= 6)
+train_preds = predict(rf, trn_df, type='class')
+train_cm = confusionMatrix(train_preds, trn_df$Endpoint, positive='1')
+
+print(train_cm)
+```
+
+
+```{r}
+train_cm$byClass
+```
+
+
+```{r}
+setwd("A:/shared/P428/Datasets")
+test = read_csv('test_data.csv')
+
+
+test = na.omit(test)
+safeID <- list(test$ID)
+test <- test[, -1]
+test <- test[, -1]
+
+
+test$RaceEthnicity = as.factor(test$RaceEthnicity)
+test$Education = as.factor(test$Education)
+test$LivingSituation = as.factor(test$LivingSituation)
+test$CurrSmoking = as.factor(test$CurrSmoking)
+test$AlcUse = as.factor(test$AlcUse)
+test$Frailty = factor(test$Frailty, ordered=T)
+test$Endpoint = factor(test$Endpoint)
+colnames(test) = make.names(colnames(test))
+```
+```{r}
+test_preds = predict(rf, test, type='class')
+test_cm = confusionMatrix(test_preds, test$Endpoint, positive='1')
+print(test_cm)
+```
+```{r}
+prob = predict(rf, test , type='prob')
+
+write.csv(prob,"newTestRFProb.csv")
+```
+```{r}
+write.csv(safeID,"TestsafeID.csv")
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
