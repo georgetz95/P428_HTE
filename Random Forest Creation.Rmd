@@ -22,10 +22,11 @@ library(randomForestSRC)
 # Load the training dataset
 
 setwd("A:/shared/P428/Datasets")
-df = read_csv('train_data.csv')
+df = read_csv('train_data_07152023.csv')
 df <- df[, -1]
 df = na.omit(df)
 
+# Transforming categorical features into factor type
 df$RaceEthnicity = as.factor(df$RaceEthnicity)
 df$Education = as.factor(df$Education)
 df$LivingSituation = as.factor(df$LivingSituation)
@@ -36,13 +37,16 @@ df$Endpoint = factor(df$Endpoint)
 colnames(df) = make.names(colnames(df))
 
 # Oversample minority class
-trn_0 = df[df$Endpoint == 0, ]
-trn_1 = df[df$Endpoint == 1, ]
+trn_0 = df[df$Endpoint == 0, ] # All data with Endpoint == 0
+trn_1 = df[df$Endpoint == 1, ] # All data with Endpoint == 1
+# Random sample of indices from positive class with replacement, size=length of negative class
 over_ix = sample(seq(nrow(trn_1)), nrow(trn_0), replace=TRUE)
 trn_1_over = trn_1[over_ix, ]
-trn_df = rbind(trn_0, trn_1_over)
+trn_df = rbind(trn_0, trn_1_over) # Combined oversampled positive class
+data with negative class data, resulting in equal number of positive and negative cases
 trn_df = trn_df %>% select(-c(ID, Treatment))
 
+head(trn_df)
 ```
 ```{r}
 table(trn_df$Endpoint)
@@ -50,14 +54,14 @@ table(trn_df$Endpoint)
 ```{r}
 
 setwd("A:/shared/P428/Datasets")
-test = read_csv('test_data.csv')
+test = read_csv('test_data_07152023.csv')
 
-test = na.omit(test)
-safeID <- list(test$ID)
+test = na.omit(test) # Remove null values
+safeID <- list(test$ID) # Save patient IDs in test set
 test <- test[, -1]
 test <- test[, -1]
 
-
+# Transforming categorical features into factor type
 test$RaceEthnicity = as.factor(test$RaceEthnicity)
 test$Education = as.factor(test$Education)
 test$LivingSituation = as.factor(test$LivingSituation)
@@ -69,63 +73,72 @@ colnames(test) = make.names(colnames(test))
 
 
 
-
+# Train the Random Forest model for 30 iterations
 seed = 123
 n_iter = 30
 
-train_accs = c()
-train_sens = c()
-train_specs = c()
-train_auc_list = c()
-train_pre_list = c()
+# Various performance metrics for training and testing sets
+train_accs = c() # Training accuracy
+train_sens = c() # Training sensitivity
+train_specs = c() # Training specificity
+train_auc_list = c() # Training AUC
+train_pre_list = c() # Training precision
 
 
-test_accs = c()
-test_sens = c()
-test_specs = c()
-test_auc_list = c()
-test_pre_list = c()
+test_accs = c() # Testing accuracy
+test_sens = c() # Testing sensitivity
+test_specs = c() # Testing specificity
+test_auc_list = c() # Testing AUC
+test_pre_list = c() # Testing precision
+rfs = c() # To store all of the Random Forest models
 
-v_imps = data.frame()
+v_imps = data.frame() # Dataframe to store variable importances
 
 for (i in seq(n_iter)) {
   
     # Get bootstraps
-    set.seed(seed + i)
-  
+    set.seed(seed + i) # Change the seed for each iteration
     boot_ix = sample(seq(nrow(trn_df)), nrow(trn_df), replace=TRUE)
     trn_df_boot = trn_df[boot_ix, ]
 
- 
-    rf <- randomForest(Endpoint ~., data=trn_df, proximity = F, ntree= 100, maxnodes= 10)
+    # Train the Random Forest model 
+    rf <- randomForest(Endpoint ~ ., data=trn_df, proximity = F, ntree= 100, maxnodes=10)
+    rfs[[i]] = rf
     
-    v_imp = data.frame(t(importance(rf)))
-    v_imps = v_imps %>% bind_rows(v_imp)
+    v_imp = data.frame(t(importance(rf))) 
+    v_imps = v_imps %>% bind_rows(v_imp) # Store the model's variable importances
   
-    train_preds = predict(rf, trn_df, type='class')
-    train_cm = confusionMatrix(train_preds, trn_df$Endpoint, positive='1')
+    train_preds = predict(rf, trn_df, type='class')  # Class predictions for the training set
+    train_cm = confusionMatrix(train_preds, trn_df$Endpoint, positive='1') # Confusion matrix for training set
+
+    #  Accuracy, Sensitivity, Specificity, Precision metrics on training data:
     train_accs = append(train_accs, as.numeric(train_cm$overall[1]))
     train_sens = append(train_sens, as.numeric(train_cm$byClass[1]))
     train_specs = append(train_specs, as.numeric(train_cm$byClass[2]))
     train_pre_list = append(train_pre_list, as.numeric(train_cm$byClass[3]))
     
     library(ROCR)
+    # Model prediction probabilities for the training data
     trainPredsProb = predict(rf, trn_df, type = "prob")[, 2]
     trainROCPred = prediction(trainPredsProb, trn_df$Endpoint)
-    train_auc = performance(trainROCPred, measure = 'auc')@y.values[[1]]
+    train_auc = performance(trainROCPred, measure = 'auc')@y.values[[1]] # AUC score calculation for the training data
     train_auc_list = append(train_auc_list, train_auc)
     
-    test_preds = predict(rf, test, type='class')
-    test_cm = confusionMatrix(test_preds, test$Endpoint, positive='1')
+    # Prediction metrics for the testing data
+    test_preds = predict(rf, test, type='class') # Class predictions for the testing set
+    test_cm = confusionMatrix(test_preds, test$Endpoint, positive='1') # Confusion matrix for training set
+
+    # Accuracy, Sensitivity, Specificity, Precision metrics on testing data:
     test_accs = append(test_accs, as.numeric(test_cm$overall[1]))
     test_sens = append(test_sens, as.numeric(test_cm$byClass[1]))
     test_specs = append(test_specs, as.numeric(test_cm$byClass[2]))
     test_pre_list = append(test_pre_list, as.numeric(test_cm$byClass[3]))
     
+    # Model prediction probabilities for the testing data
     testPreds = predict(rf, test, type = "class")
     testPredsProb = predict(rf, test, type = "prob")[, 2]
     testROCPred = prediction(testPredsProb, test$Endpoint)
-    test_auc = performance(testROCPred, measure = 'auc')@y.values[[1]]
+    test_auc = performance(testROCPred, measure = 'auc')@y.values[[1]] # AUC score calculation for the testing data
     test_auc_list = append(test_auc_list, test_auc)
     
 }
@@ -134,6 +147,7 @@ for (i in seq(n_iter)) {
 
 
 ```{r}
+# Average metrics from the 30 iterations with confidence intervals
 n_reps = n_iter
 cat('Training Accuracy:', mean(train_accs), '+/-', 1.96*sd(train_accs)/sqrt(n_reps))
 cat('\nTraining Sensitivity:', mean(train_sens), '+/-', 1.96*sd(train_sens)/sqrt(n_reps))
@@ -147,10 +161,37 @@ cat('\nTesting Specificity:', mean(test_specs), '+/-', 1.96*sd(test_specs)/sqrt(
 cat('\nTesting Precision:', mean(test_pre_list), '+/-', 1.96*sd(test_pre_list)/sqrt(n_reps))
 cat('\nTesting AUC:', mean(test_auc_list), '+/-', 1.96*sd(test_auc_list)/sqrt(n_reps))
 ```
+
+```{r}
+setwd("A:/Data/DecisionTrees/")
+# Final Random Forest model is the one with the median accuracy score
+med_tst_ix = sort(test_accs, index.return=TRUE)$ix[length(test_accs)%/%2]
+med_rf = rfs[[med_tst_ix]]
+# Median model's predicted probabilities on training data
+trn_preds = predict(med_rf, newdata=trn_df, type='prob', predict.all=TRUE, nodes=TRUE)
+# Terminal nodes for each tree for each train record
+trn_node_preds = attributes(trn_preds)$nodes
+# Class predictions on the training data
+trn_class_preds = trn_preds$individual
+
+# Median model's predicted probabilities on testing data
+tst_preds = predict(med_rf, newdata=test, type='prob', predict.all=TRUE, nodes=TRUE)
+# Terminal nodes for each tree for each test record
+tst_node_preds = attributes(tst_preds)$nodes
+# Class predictions on the test data
+tst_class_preds = tst_preds$individual
+
+# Save results onto csv files
+write.csv(trn_node_preds, 'trn_nodes_07152023')
+write.csv(trn_df$Endpoint, 'trn_class_07152023')
+write.csv(tst_node_preds, 'tst_nodes_07152023')
+write.csv(tst_class_preds, 'tst_class_07152023')
+```
+
 ```{r}
 v_imps[is.na(v_imps)] = 0
-avg_v_imps = colMeans(v_imps)
-argsort = sort(avg_v_imps, decreasing=T, index.return=T)
+avg_v_imps = colMeans(v_imps) # Average feature importance from the 30 iterations
+argsort = sort(avg_v_imps, decreasing=T, index.return=T) # Sorted in descending order based on mean decrease in Gini imputity
 png(filename = "figure.png",width = 900, bg = "white")
 par(mar=c(10,6,4,1)+0.1)
 barplot(head(avg_v_imps[argsort$ix], 15), names.arg=head(names(avg_v_imps[argsort$ix]), 15), ylab='Mean decrease in Gini', las=2)
@@ -160,13 +201,13 @@ barplot(head(avg_v_imps[argsort$ix], 15), names.arg=head(names(avg_v_imps[argsor
 library(ROCR)
 trainPredsProb = predict(rf, trn_df, type = "prob")[, 2]
 trainROCPred = prediction(trainPredsProb, trn_df$Endpoint)
-performance(trainROCPred, measure = 'auc')@y.values[[1]]
+performance(trainROCPred, measure = 'auc')@y.values[[1]] # AUC score of median RF model on training data
 
 
 testPreds = predict(rf, test, type = "class")
 testPredsProb = predict(rf, test, type = "prob")[, 2]
 testROCPred = prediction(testPredsProb, test$Endpoint)
-performance(testROCPred, measure = 'auc')@y.values[[1]]
+performance(testROCPred, measure = 'auc')@y.values[[1]] # AUC score of median RF model on testing data
 ```
 
 ```{r}
@@ -184,6 +225,7 @@ table(trn_df_boot$Endpoint)
 
 
 ```{r}
+# Additional pruned Random Forest model to prevent overfitting
 tr_control = rpart.control(cp=0.05)
 rf <- randomForest(Endpoint ~., data=trn_df, proximity = TRUE, ntree= 3, max_depth = 3, mtry = 6,control=tr_control,minsplit= 6)
 train_preds = predict(rf, trn_df, type='class')
@@ -200,7 +242,7 @@ train_cm$byClass
 
 ```{r}
 setwd("A:/shared/P428/Datasets")
-test = read_csv('test_data.csv')
+test = read_csv('test_data_07152023.csv')
 
 
 test = na.omit(test)
@@ -224,9 +266,10 @@ test_cm = confusionMatrix(test_preds, test$Endpoint, positive='1')
 print(test_cm)
 ```
 ```{r}
+setwd("A:/shared/P428/Datasets")
 prob = predict(rf, test , type='prob')
 
-write.csv(prob,"newTestRFProb.csv")
+write.csv(prob,"RF_Unweighted_Probs_07152023.csv")
 ```
 ```{r}
 write.csv(safeID,"TestsafeID.csv")

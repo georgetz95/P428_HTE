@@ -4,6 +4,7 @@ output: html_notebook
 ---
 
 ```{r}
+# Load libraries
 library(tidyverse)
 library(rpart)
 library(caret)
@@ -13,17 +14,20 @@ library(ROCR)
 ```
 
 ```{r Over-Under Data Preprocessing}
+# Read dataset
 df = read.csv('A://shared//P428//Datasets//neumann_feats_all.csv')
+# Factorize categorical features
 df$RaceEthnicity = as.factor(df$RaceEthnicity)
 levels(df$RaceEthnicity) = c('H', 'B', 'W', 'O')
 df$LivingSituation = as.factor(df$LivingSituation)
 df$CurrSmoking = as.factor(df$CurrSmoking)
 df$AlcUse = as.factor(df$AlcUse)
 df$Endpoint = as.factor(df$Endpoint)
+# Turn BMI into ordinal feature
 df$BMI = cut(df$BMI, 
              breaks = c(0, 18.5, 25, 30, 100),
              labels = c('under', 'normal', 'over', 'obese'))
-
+# US subset only
 df_us2 = df %>% filter(Country == 2) %>%
   select(-c(Country, Yr1Adherence, Treatment))
 
@@ -34,37 +38,38 @@ df_us = df_us2
 ```
 
 ```{r Train Functions}
-train_trees = function(n_iter, df, seed, cp, sample_method='over') {
-  trn_accs = c()
-  tst_accs = c()
-  trn_sens = c()
-  tst_sens = c()
-  trn_specs = c()
-  tst_specs = c()
-  trn_ppvs = c()
-  tst_ppvs = c()
-  trees = c()
-  v_imps = c()
-  trn_aucs = c()
-  tst_aucs = c()
-  cms = c()
+# Function to train multiple Decision Trees
+train_trees = function(n_iter, df, seed, cp, sample_method='over') { #number of iterations, dataset, seed value, control parameters, oversampling method
+  trn_accs = c() # Training accuracy
+  tst_accs = c() # Testing accuracy
+  trn_sens = c() # Training sensitivity
+  tst_sens = c() # Testing sensitivity
+  trn_specs = c() # Training specificity
+  tst_specs = c() # Testing specificity
+  trn_ppvs = c() # Training precision
+  tst_ppvs = c() # Testing precision
+  trees = c() # Fitted trees
+  v_imps = c() # Variable importances
+  trn_aucs = c() # Training AUC
+  tst_aucs = c() # Testing AUC
+  cms = c() # Confusion matrices
   
   for (i in seq(n_iter)) {
     set.seed(seed + i)
     ix = sample(c(T, F), nrow(df), replace=T, prob=c(0.5, 0.5))
     df_trn = df[ix, ]
-    df_0 = df_trn[df_trn$Endpoint == 0, ]
-    df_1 = df_trn[df_trn$Endpoint == 1, ]
-    if (sample_method == 'over') {
+    df_0 = df_trn[df_trn$Endpoint == 0, ] # Data subset with Endpoint=0
+    df_1 = df_trn[df_trn$Endpoint == 1, ] # Data subset with Endpoint=1
+    if (sample_method == 'over') { # Oversampling
       ix_oversamp = sample(seq(nrow(df_1)), nrow(df_0), replace=T)
       df_new = rbind(df_1[ix_oversamp, ], df_0)
-    } else if (sample_method == 'under') {
+    } else if (sample_method == 'under') { # Undersampling
       ix_undersamp = sample(seq(nrow(df_0)), nrow(df_1), replace=F)
       df_new = rbind(df_0[ix_undersamp, ], df_1)
     }
     
-    tree_params = rpart.control(cp=cp)
-    tree = rpart(Endpoint ~ ., data=df_new, method='class', control=tree_params)
+    tree_params = rpart.control(cp=cp) # Set decision tree parameters
+    tree = rpart(Endpoint ~ ., data=df_new, method='class', control=tree_params) # Fit decision tree
     trees[[i]] = tree
     v_imps[[i]] = tree$variable.importance
     
