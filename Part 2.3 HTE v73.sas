@@ -114,7 +114,7 @@ proc sql; create table HTE_internal_risk_data as
 *######################################################################################################################################################################;
 ods graphics on / width = 5in   height = 5in;
 ods text = "***** Note: For figure below: No HTE testing, Cox Proportional Hazard Regression with adjustment for Risk Group ****";
-proc phreg data=HTE_internal_risk_data  plots=(roc) rocoptions(at=6.5 auc method=nne) ;
+proc phreg data=HTE_internal_risk_data  plots=(roc) rocoptions(at=5 auc method=nne) ;
 	model &my_time_to_event * &my_censor_event(0) = &my_raw_value / rl ;
 run;
 ods graphics on / width = 5in   height = 5in;
